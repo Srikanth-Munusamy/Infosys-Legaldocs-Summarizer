@@ -1,5 +1,4 @@
 myenv/
-LaMini-Flan-T5-248M/
 data/
 __init__.py
 .env
