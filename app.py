@@ -1,6 +1,7 @@
+import requests
 import streamlit as st
 from pdfminer.high_level import extract_text
-import smtplib  # Add this import at the top of your code
+import smtplib
 from email.message import EmailMessage
 from email_validator import validate_email, EmailNotValidError
 import spacy
@@ -11,14 +12,33 @@ from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
-from transformers import pipeline
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+import chromadb
+import matplotlib
+from langchain.chains import RetrievalQA
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+
+matplotlib.rcParams['font.family'] = 'Arial'
 
 # Load environment variables
 load_dotenv()
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
+
+# Initialize ChromaDB and SentenceTransformer model for embeddings
+client = chromadb.Client()
+
+try:
+    # Attempt to get the collection
+    collection = client.get_collection("legal_docs_collection")
+except chromadb.errors.InvalidCollectionException:
+    # If the collection does not exist, create it
+    collection = client.create_collection("legal_docs_collection")
+
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Email settings
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
@@ -38,7 +58,12 @@ def extract_key_clauses(text):
     return [sent.text.strip() for sent in nlp(text).sents if any(ind in sent.text.lower() for ind in indicators)]
 
 def detect_hidden_risks(text):
-    risks = ["dependency", "contingency", "subject to", "provided that"]
+    risks = [
+        "dependency", "contingency", "subject to", "provided that",
+        "unless", "in the event of", "without prejudice", "under no circumstances",
+        "notwithstanding", "in the case of", "except as otherwise",
+        "limited to", "may be", "shall not", "in accordance with", "at the discretion of"
+    ]
     return [sent.text.strip() for sent in nlp(text).sents if any(risk in sent.text.lower() for risk in risks)]
 
 def summarize_text(text, num_sentences=5):
@@ -84,25 +109,82 @@ def visualize_data(key_clauses, risks, summary):
             plt.xticks(rotation=45)
             st.pyplot(fig)
 
-def setup_qa_model():
-    # Load the question-answering model and tokenizer
-    qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
-    return qa_pipeline
+def setup_rag_model():
+    embeddings = SentenceTransformerEmbeddings(embedding_model)
+    vector_store = Chroma(client=client, collection_name="legal_docs_collection", embedding_function=embeddings)
+    retriever = vector_store.as_retriever()
+    return retriever
 
-def get_answer_from_qa(question, text, qa_pipeline):
-    # Get the answer to the question from the document using the QA model
-    answer = qa_pipeline(question=question, context=text)
-    return answer['answer']
+def get_answer_from_groq_api(question, api_key):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [ { "role": "user", "content": question } ]
+    }
 
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            response_json = response.json()
+            answer = response_json['choices'][0]['message']['content']
+            return answer.strip()
+        else:
+            st.error(f"Error with Groq API: {response.status_code} - {response.text}")
+            return ""
+    except Exception as e:
+        st.error(f"Error with API request: {e}")
+        return ""
 
-# Main app
+def store_embeddings(text, doc_id):
+    existing_docs = collection.get(ids=[doc_id])
+    if existing_docs:
+        return
+    embeddings = embedding_model.encode([text])
+    collection.add(
+        documents=[text],
+        embeddings=embeddings,
+        metadatas=[{"doc_id": doc_id}],
+        ids=[doc_id]
+    )
+
+def fetch_regulatory_updates():
+    try:
+        response = requests.get("https://run.mocky.io/v3/db70cbfe-6a57-42af-996c-2856de24a473")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error("Failed to fetch regulatory updates.")
+            return []
+    except Exception as e:
+        st.error(f"Error fetching regulatory updates: {e}")
+        return []
+
+def track_regulatory_updates(text, updates):
+    affected_sections = []
+    for update in updates.get("regulatory_updates", []):
+        if isinstance(update, dict):
+            section = update.get("section", "")
+            sub_section = update.get("sub_section", "")
+            update_text = update.get("update", "").lower()
+            if section.lower() in text.lower() and sub_section.lower() in text.lower():
+                affected_sections.append(f"Section: {section} Sub-Section: {sub_section} Update: {update_text}")
+    return affected_sections
+
 def main():
     st.set_page_config(page_title="Legal Document Analyzer", layout="wide")
     st.title("📜 Legal Document Analyzer")
 
     st.sidebar.header("Options")
     uploaded_file = st.sidebar.file_uploader("Upload a legal document (PDF)", type="pdf")
-    option = st.sidebar.radio("Select analysis:", ["Summarize", "Extract Key Clauses", "Risk Detection", "Question Answering","All"])
+    option = st.sidebar.radio(
+        "Select analysis:",
+        ["Summarize", "Extract Key Clauses", "Risk Detection", "Regulatory Updates", "Question Answering", "All"]
+    )
     email = st.sidebar.text_input("Enter email to receive results:")
     send_email_button = st.sidebar.button("Send Results via Email")
 
@@ -110,7 +192,9 @@ def main():
         text = extract_text(uploaded_file)
         st.success("Document processed successfully!")
 
-        summary, key_clauses, risks = "", [], []
+        store_embeddings(text, uploaded_file.name)
+
+        summary, key_clauses, risks, affected_sections = "", [], [], []
         if option in ["Summarize", "All"]:
             summary = summarize_text(text)
             st.subheader("✍ Summary")
@@ -126,26 +210,31 @@ def main():
             st.subheader("⚠️ Risks Detected")
             st.write("\n".join(risks))
 
-        # Setup the QA model
+        if option in ["Regulatory Updates", "All"]:
+            updates = fetch_regulatory_updates()
+            if updates:
+                affected_sections = track_regulatory_updates(text, updates)
+                st.subheader("📑 Regulatory Updates Tracker")
+                st.write("\n".join(affected_sections))
+
         if option == "Question Answering":
-            qa_pipeline = setup_qa_model()
             question = st.text_input("Ask a question about the document:")
             if question:
-                answer = get_answer_from_qa(question, text, qa_pipeline)
+                api_key = os.getenv("GROQ_API_KEY")
+                answer = get_answer_from_groq_api(question, api_key)
                 st.subheader("📝 Answer")
                 st.write(answer)
 
-        # Visualize results
         visualize_data(key_clauses, risks, summary)
+        update_google_sheets([uploaded_file.name, len(key_clauses), len(risks), summary[:100], len(affected_sections)])
 
-        # Update Google Sheets
-        update_google_sheets([uploaded_file.name, len(key_clauses), len(risks), summary[:100]])
-
-        # Send email
         if send_email_button and email:
             try:
                 validate_email(email)
-                body = f"Summary:\n{summary}\n\nKey Clauses:\n{key_clauses}\n\nRisks:\n{risks}"
+                body = (
+                    f"Summary:\n{summary}\n\nKey Clauses:\n{key_clauses}\n\nRisks:\n{risks}\n\n"
+                    f"Affected Sections:\n{affected_sections}"
+                )
                 send_email(email, "Legal Document Analysis Results", body)
             except EmailNotValidError:
                 st.error("Invalid email address.")
