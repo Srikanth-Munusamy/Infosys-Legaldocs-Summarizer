@@ -1,4 +1,7 @@
 myenv/
 data/
 __init__.py
+.env
 service_account.json
+DejaVuSans.cw127.pkl
+DejaVuSans.pkl
