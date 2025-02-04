@@ -293,6 +293,7 @@ def send_email(recipient_email, subject, body,attachment_filename=None):
     except Exception as e:
         st.error(f"Error sending email: {e}")
 
+
 #main Function
 def main():
     """Main function for Streamlit app."""
