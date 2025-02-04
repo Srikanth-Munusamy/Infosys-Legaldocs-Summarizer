@@ -53,10 +53,7 @@ def clean_text(text):
 #Summarization Function
 def summarize_text(text, num_sentences=5):
     """Summarize text excluding numerical values and common stopwords."""
-    cleaned_text = clean_text(text)  # Clean the text before summarization
-    lasttenpercent = len(text)//10
-    c = cleaned_text[:-lasttenpercent]
-    doc = nlp(c)
+    doc = nlp(clean_text(text))  # Clean the text before summarization
     
     word_freq = Counter(
         token.text.lower()
@@ -69,8 +66,9 @@ def summarize_text(text, num_sentences=5):
     }
     top_sentences = heapq.nlargest(num_sentences, sent_scores, key=sent_scores.get)
     
-    # Join top sentences and return as summary
-    return ". ".join(str(sent).strip() for sent in top_sentences)
+    # Return summary as a properly formatted paragraph
+    return ". ".join(str(sent).strip() for sent in top_sentences) + "."
+
 
 #key clauses Extraction Function
 def extract_key_clauses(text):
@@ -80,7 +78,7 @@ def extract_key_clauses(text):
     for sent in nlp(text).sents:
         if any(ind in sent.text.lower() for ind in indicators):
             clauses.append(sent.text.strip())
-    return sorted(set(clauses), key=clauses.index)  
+    return sorted(set(clauses), key=clauses.index)
 
 #Risk Detection Function
 def detect_hidden_risks(text):
@@ -89,13 +87,17 @@ def detect_hidden_risks(text):
         "dependency", "contingency", "subject to", "provided that", "unless",
         "in the event of", "without prejudice", "under no circumstances",
         "notwithstanding", "in the case of", "except as otherwise",
-        "limited to", "may be", "shall not", "in accordance with", "at the discretion of"
+        "limited to", "may be", "shall not", "in accordance with", 
+        "at the discretion of", "conditional upon", "exclusive of",
+        "without limitation", "subject to change", "binding upon",
+        "liable for", "force majeure", "to the extent permitted by law",
     ]
     risk_phrases = []
     for sent in nlp(text).sents:
         if any(risk in sent.text.lower() for risk in risks):
             risk_phrases.append(sent.text.strip())
     return sorted(set(risk_phrases), key=risk_phrases.index) 
+    
 
 #Regulatory updates Fetch
 def fetch_regulatory_updates():
